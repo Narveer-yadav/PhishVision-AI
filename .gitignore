@@ -1,31 +1,21 @@
-# Virtual environment
 venv/
 .venv/
 
-# Environment variables / API keys
 .env
 .env.*
 
-# Trained model
 model/
-
-# Dataset
 dataset/
 
-# Python cache
 __pycache__/
 *.py[cod]
 
-# Jupyter
 .ipynb_checkpoints/
 
-# IDE
 .vscode/
 .idea/
 
-# OS files
+.streamlit/secrets.toml
+
 .DS_Store
 Thumbs.db
-
-# Streamlit
-.streamlit/secrets.toml

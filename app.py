@@ -1,83 +1,51 @@
 import os
 import time
 import requests
-import torch
 import streamlit as st
+import torch
 
 from PIL import Image
-from dotenv import load_dotenv
 from transformers import ViTImageProcessor, ViTForImageClassification
+from dotenv import load_dotenv
 
 
 # ============================================================
-# CONFIG
-# ============================================================
-
-load_dotenv()
-
-MODEL_DIR = "model"
-VT_API_KEY = os.getenv("VT_API_KEY")
-
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
-
-VT_BASE_URL = "https://www.virustotal.com/api/v3"
-
-
-# ============================================================
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
     page_title="PhishVision AI",
     page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="collapsed"
+    layout="centered"
 )
 
 
 # ============================================================
-# SIMPLE STREAMLIT STYLING
+# CUSTOM CSS
 # ============================================================
 
 st.markdown(
     """
     <style>
     .block-container {
-        max-width: 1500px;
+        max-width: 900px;
         padding-top: 2rem;
-        padding-left: 4rem;
-        padding-right: 4rem;
+        padding-bottom: 3rem;
     }
 
-    [data-testid="stHeader"] {
-        background: transparent;
-    }
-
-    .main-title {
-        font-size: 42px;
-        font-weight: 800;
+    h1 {
         text-align: center;
-        margin-bottom: 5px;
     }
 
-    .main-subtitle {
+    .subtitle {
         text-align: center;
-        color: #667085;
-        font-size: 18px;
-        margin-bottom: 30px;
+        color: #666;
+        margin-bottom: 2rem;
     }
 
-    .result-title {
-        font-size: 28px;
-        font-weight: 750;
-        margin-top: 25px;
-    }
-
-    .small-text {
-        color: #667085;
-        font-size: 14px;
+    .section-title {
+        margin-top: 1.5rem;
+        margin-bottom: 0.5rem;
     }
     </style>
     """,
@@ -86,33 +54,30 @@ st.markdown(
 
 
 # ============================================================
-# HEADER
+# MODEL CONFIGURATION
 # ============================================================
 
-st.markdown(
-    '<div class="main-title">🛡️ PhishVision AI</div>',
-    unsafe_allow_html=True
-)
+# Hugging Face model repository
+MODEL_NAME = "narveeryadav/PhishVision-AI"
 
-st.markdown(
-    '<div class="main-subtitle">Check a website before you trust it</div>',
-    unsafe_allow_html=True
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
 )
 
 
 # ============================================================
-# LOAD MODEL
+# LOAD MODEL FROM HUGGING FACE
 # ============================================================
 
 @st.cache_resource
 def load_model():
 
     processor = ViTImageProcessor.from_pretrained(
-        MODEL_DIR
+        MODEL_NAME
     )
 
     model = ViTForImageClassification.from_pretrained(
-        MODEL_DIR
+        MODEL_NAME
     )
 
     model.to(DEVICE)
@@ -121,14 +86,148 @@ def load_model():
     return processor, model
 
 
-processor, model = load_model()
+# ============================================================
+# VIRUSTOTAL CONFIGURATION
+# ============================================================
+
+load_dotenv()
+
+VT_API_KEY = os.getenv("VT_API_KEY")
 
 
 # ============================================================
-# IMAGE ANALYSIS
+# VIRUSTOTAL URL ANALYSIS
+# ============================================================
+
+def analyze_url(url):
+
+    if not VT_API_KEY:
+        return {
+            "success": False,
+            "message": "VirusTotal API key is not configured."
+        }
+
+    headers = {
+        "x-apikey": VT_API_KEY
+    }
+
+    try:
+
+        # Submit URL for analysis
+        response = requests.post(
+            "https://www.virustotal.com/api/v3/urls",
+            headers=headers,
+            data={"url": url},
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "message": f"VirusTotal request failed ({response.status_code})."
+            }
+
+        data = response.json()
+
+        analysis_id = data["data"]["id"]
+
+        # Poll analysis result
+        analysis_url = (
+            f"https://www.virustotal.com/api/v3/analyses/{analysis_id}"
+        )
+
+        stats = None
+
+        for _ in range(10):
+
+            analysis_response = requests.get(
+                analysis_url,
+                headers=headers,
+                timeout=30
+            )
+
+            if analysis_response.status_code != 200:
+                return {
+                    "success": False,
+                    "message": "Unable to retrieve VirusTotal analysis."
+                }
+
+            analysis_data = analysis_response.json()
+
+            attributes = analysis_data["data"]["attributes"]
+
+            status = attributes.get("status")
+
+            if status == "completed":
+
+                stats = attributes.get("stats", {})
+                break
+
+            time.sleep(2)
+
+        if stats is None:
+            return {
+                "success": False,
+                "message": "VirusTotal analysis timed out."
+            }
+
+        malicious = stats.get("malicious", 0)
+        suspicious = stats.get("suspicious", 0)
+        harmless = stats.get("harmless", 0)
+        undetected = stats.get("undetected", 0)
+
+        total_engines = (
+            malicious +
+            suspicious +
+            harmless +
+            undetected
+        )
+
+        # Interpretation
+        if malicious >= 2:
+
+            assessment = "Potential Threat"
+
+        elif malicious == 1 or suspicious >= 2:
+
+            assessment = "Suspicious"
+
+        else:
+
+            assessment = "No Significant Threat Detected"
+
+        return {
+            "success": True,
+            "assessment": assessment,
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected,
+            "total": total_engines
+        }
+
+    except requests.RequestException:
+
+        return {
+            "success": False,
+            "message": "Network error while contacting VirusTotal."
+        }
+
+    except Exception as e:
+
+        return {
+            "success": False,
+            "message": f"URL analysis failed: {str(e)}"
+        }
+
+
+# ============================================================
+# VISUAL ANALYSIS
 # ============================================================
 
 def analyze_image(image):
+
+    processor, model = load_model()
 
     inputs = processor(
         images=image,
@@ -154,246 +253,62 @@ def analyze_image(image):
             dim=1
         ).item()
 
-    legitimate = probabilities[0][0].item() * 100
-    phishing = probabilities[0][1].item() * 100
+        legitimate_probability = (
+            probabilities[0][0].item() * 100
+        )
 
-    confidence = max(
-        legitimate,
-        phishing
-    )
+        phishing_probability = (
+            probabilities[0][1].item() * 100
+        )
 
-    if prediction == 1:
-
-        if phishing >= 75:
-            status = "Likely Phishing"
-            message = (
-                "The screenshot shows strong characteristics "
-                "associated with phishing websites."
-            )
-            result_type = "danger"
-
-        elif phishing >= 50:
-            status = "Suspicious"
-            message = (
-                "The screenshot contains characteristics "
-                "that may be associated with phishing."
-            )
-            result_type = "warning"
-
-        else:
-            status = "Potentially Suspicious"
-            message = (
-                "The model detected some unusual characteristics. "
-                "Verify the website before continuing."
-            )
-            result_type = "warning"
-
-    else:
-
-        if legitimate >= 75:
-            status = "Likely Safe"
-            message = (
-                "The visual model did not identify strong "
-                "phishing characteristics."
-            )
-            result_type = "safe"
-
-        elif legitimate >= 50:
-            status = "Appears Safe"
-            message = (
-                "The screenshot appears relatively normal, "
-                "but additional verification is recommended."
-            )
-            result_type = "safe"
-
-        else:
-            status = "Suspicious"
-            message = (
-                "The model could not confidently classify "
-                "the screenshot as legitimate."
-            )
-            result_type = "warning"
+        confidence = (
+            probabilities[0][prediction].item() * 100
+        )
 
     return {
-        "status": status,
-        "message": message,
-        "type": result_type,
-        "confidence": confidence,
-        "legitimate": legitimate,
-        "phishing": phishing
+        "prediction": prediction,
+        "legitimate_probability": legitimate_probability,
+        "phishing_probability": phishing_probability,
+        "confidence": confidence
     }
 
 
 # ============================================================
-# URL ANALYSIS
+# HEADER
 # ============================================================
 
-def analyze_url(url):
+st.title("🛡️ PhishVision AI")
 
-    if not VT_API_KEY:
-
-        return {
-            "error": "URL analysis is not configured."
-        }
-
-    headers = {
-        "x-apikey": VT_API_KEY
-    }
-
-    try:
-
-        response = requests.post(
-            f"{VT_BASE_URL}/urls",
-            headers=headers,
-            data={"url": url},
-            timeout=30
-        )
-
-        if response.status_code != 200:
-
-            return {
-                "error": "Unable to submit the URL for analysis."
-            }
-
-        data = response.json()
-
-        analysis_id = data["data"]["id"]
-
-        analysis_url = (
-            f"{VT_BASE_URL}/analyses/{analysis_id}"
-        )
-
-        analysis_data = None
-
-        for _ in range(10):
-
-            response = requests.get(
-                analysis_url,
-                headers=headers,
-                timeout=30
-            )
-
-            if response.status_code != 200:
-
-                return {
-                    "error": "Unable to retrieve URL analysis."
-                }
-
-            analysis_data = response.json()["data"]
-
-            status = analysis_data["attributes"]["status"]
-
-            if status == "completed":
-                break
-
-            time.sleep(2)
-
-        else:
-
-            return {
-                "error": "URL analysis timed out."
-            }
-
-        stats = analysis_data["attributes"]["stats"]
-
-        malicious = stats.get("malicious", 0)
-        suspicious = stats.get("suspicious", 0)
-        harmless = stats.get("harmless", 0)
-        undetected = stats.get("undetected", 0)
-
-        total = (
-            malicious +
-            suspicious +
-            harmless +
-            undetected
-        )
-
-        if malicious >= 2:
-
-            status = "Potential Threat"
-            result_type = "danger"
-
-        elif malicious == 1 or suspicious >= 2:
-
-            status = "Suspicious"
-            result_type = "warning"
-
-        else:
-
-            status = "No Significant Threat Detected"
-            result_type = "safe"
-
-        return {
-            "url": url,
-            "malicious": malicious,
-            "suspicious": suspicious,
-            "harmless": harmless,
-            "undetected": undetected,
-            "total": total,
-            "status": status,
-            "type": result_type
-        }
-
-    except requests.RequestException:
-
-        return {
-            "error": "Network error while checking the URL."
-        }
-
-    except Exception:
-
-        return {
-            "error": "Something went wrong during URL analysis."
-        }
+st.markdown(
+    '<div class="subtitle">Check a website before you trust it</div>',
+    unsafe_allow_html=True
+)
 
 
 # ============================================================
 # INPUT SECTION
 # ============================================================
 
-st.subheader("Analyze a Website")
-
-st.caption(
-    "Upload a website screenshot, enter a URL, or provide both."
+st.markdown(
+    '<h3 class="section-title">🖼️ Website Screenshot</h3>',
+    unsafe_allow_html=True
 )
 
-col1, col2 = st.columns(2)
+uploaded_file = st.file_uploader(
+    "Upload a website screenshot",
+    type=["png", "jpg", "jpeg"]
+)
 
 
-# ============================================================
-# SCREENSHOT
-# ============================================================
+st.markdown(
+    '<h3 class="section-title">🌐 Website URL</h3>',
+    unsafe_allow_html=True
+)
 
-with col1:
-
-    st.markdown("### 📷 Website Screenshot")
-
-    st.caption(
-        "Upload a screenshot of the website you want to check."
-    )
-
-    uploaded_file = st.file_uploader(
-        "Choose an image",
-        type=["png", "jpg", "jpeg"]
-    )
-
-
-# ============================================================
-# URL
-# ============================================================
-
-with col2:
-
-    st.markdown("### 🌐 Website URL")
-
-    st.caption(
-        "Enter the complete website address."
-    )
-
-    url = st.text_input(
-        "URL",
-        placeholder="https://example.com"
-    )
+url = st.text_input(
+    "Enter website URL",
+    placeholder="https://example.com"
+)
 
 
 # ============================================================
@@ -410,11 +325,10 @@ if uploaded_file:
             uploaded_file
         ).convert("RGB")
 
-        st.markdown("### Screenshot Preview")
-
         st.image(
             image,
-            width=700
+            caption="Website Screenshot",
+            use_container_width=True
         )
 
     except Exception:
@@ -428,327 +342,323 @@ if uploaded_file:
 # ANALYZE BUTTON
 # ============================================================
 
-st.markdown("")
-
 analyze_button = st.button(
-    "🔎 Analyze Website",
-    type="primary",
+    "🔍 Analyze Website",
     use_container_width=True
 )
 
 
 # ============================================================
-# START ANALYSIS
+# ANALYSIS
 # ============================================================
 
 if analyze_button:
 
-    has_image = image is not None
-    has_url = bool(url.strip())
-
-    if not has_image and not has_url:
+    if not image and not url.strip():
 
         st.warning(
             "Please upload a screenshot or enter a website URL."
         )
 
-    else:
+        st.stop()
 
-        image_result = None
-        url_result = None
+    visual_result = None
+    url_result = None
 
 
-        # ====================================================
-        # IMAGE
-        # ====================================================
+    # ========================================================
+    # VISUAL ANALYSIS
+    # ========================================================
 
-        if has_image:
+    if image:
 
-            with st.spinner(
-                "Analyzing the website screenshot..."
-            ):
+        with st.spinner(
+            "Analyzing website screenshot..."
+        ):
 
-                image_result = analyze_image(
+            try:
+
+                visual_result = analyze_image(
                     image
                 )
 
+            except Exception as e:
 
-        # ====================================================
-        # URL
-        # ====================================================
-
-        if has_url:
-
-            clean_url = url.strip()
-
-            if not (
-                clean_url.startswith("http://")
-                or clean_url.startswith("https://")
-            ):
-
-                clean_url = "https://" + clean_url
-
-            with st.spinner(
-                "Checking the website URL..."
-            ):
-
-                url_result = analyze_url(
-                    clean_url
+                st.error(
+                    f"Visual analysis failed: {str(e)}"
                 )
 
 
-        # ====================================================
-        # RESULTS
-        # ====================================================
+    # ========================================================
+    # URL ANALYSIS
+    # ========================================================
 
-        st.markdown("---")
+    if url.strip():
+
+        with st.spinner(
+            "Checking website URL..."
+        ):
+
+            url_result = analyze_url(
+                url.strip()
+            )
+
+
+    # ========================================================
+    # VISUAL RESULT
+    # ========================================================
+
+    if visual_result:
 
         st.markdown(
-            '<div class="result-title">Security Results</div>',
+            '<h3 class="section-title">🖼️ Visual Analysis</h3>',
             unsafe_allow_html=True
         )
 
-        st.caption(
-            "Review the available indicators before trusting the website."
+        phishing_probability = (
+            visual_result["phishing_probability"]
+        )
+
+        legitimate_probability = (
+            visual_result["legitimate_probability"]
+        )
+
+        confidence = visual_result["confidence"]
+
+        prediction = visual_result["prediction"]
+
+
+        # Classification
+        if prediction == 1:
+
+            if phishing_probability >= 80:
+
+                st.error(
+                    "🚨 Likely Phishing"
+                )
+
+            else:
+
+                st.warning(
+                    "⚠️ Suspicious"
+                )
+
+        else:
+
+            if legitimate_probability >= 80:
+
+                st.success(
+                    "✅ Appears Safe"
+                )
+
+            else:
+
+                st.warning(
+                    "⚠️ Potentially Suspicious"
+                )
+
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Model Confidence",
+                f"{confidence:.2f}%"
+            )
+
+        with col2:
+
+            st.metric(
+                "Phishing Probability",
+                f"{phishing_probability:.2f}%"
+            )
+
+        with col3:
+
+            st.metric(
+                "Legitimate Probability",
+                f"{legitimate_probability:.2f}%"
+            )
+
+
+        st.progress(
+            min(phishing_probability / 100, 1.0)
         )
 
 
-        # ====================================================
-        # VISUAL RESULT
-        # ====================================================
+    # ========================================================
+    # URL RESULT
+    # ========================================================
 
-        if image_result:
+    if url_result:
 
-            st.markdown("## 🖼️ Visual Analysis")
+        st.markdown(
+            '<h3 class="section-title">🌐 URL Threat Analysis</h3>',
+            unsafe_allow_html=True
+        )
 
-            if image_result["type"] == "danger":
+        if url_result["success"]:
+
+            assessment = url_result["assessment"]
+
+            if assessment == "Potential Threat":
 
                 st.error(
-                    f"⚠️ {image_result['status']}\n\n"
-                    f"{image_result['message']}"
+                    "🚨 Potential Threat"
                 )
 
-            elif image_result["type"] == "warning":
+            elif assessment == "Suspicious":
 
                 st.warning(
-                    f"⚠️ {image_result['status']}\n\n"
-                    f"{image_result['message']}"
+                    "⚠️ Suspicious"
                 )
 
             else:
 
                 st.success(
-                    f"✓ {image_result['status']}\n\n"
-                    f"{image_result['message']}"
+                    "✅ No Significant Threat Detected"
                 )
 
 
-            metric1, metric2, metric3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
 
-            with metric1:
+            with col1:
 
                 st.metric(
-                    "Model Confidence",
-                    f"{image_result['confidence']:.1f}%"
+                    "Malicious",
+                    url_result["malicious"]
                 )
 
-            with metric2:
+            with col2:
 
                 st.metric(
-                    "Phishing Probability",
-                    f"{image_result['phishing']:.1f}%"
+                    "Suspicious",
+                    url_result["suspicious"]
                 )
 
-            with metric3:
+            with col3:
 
                 st.metric(
-                    "Legitimate Probability",
-                    f"{image_result['legitimate']:.1f}%"
+                    "No Threat",
+                    url_result["harmless"]
                 )
 
+            with col4:
 
-            st.write("Phishing likelihood")
-
-            st.progress(
-                int(
-                    min(
-                        max(
-                            image_result["phishing"],
-                            0
-                        ),
-                        100
-                    )
+                st.metric(
+                    "Engines Checked",
+                    url_result["total"]
                 )
+
+        else:
+
+            st.warning(
+                url_result["message"]
             )
 
 
-        # ====================================================
-        # URL RESULT
-        # ====================================================
+    # ========================================================
+    # SECURITY ASSESSMENT
+    # ========================================================
 
-        if url_result:
+    if visual_result or (
+        url_result and url_result["success"]
+    ):
 
-            st.markdown("## 🌐 URL Threat Analysis")
-
-            if "error" in url_result:
-
-                st.error(
-                    url_result["error"]
-                )
-
-            else:
-
-                st.code(
-                    url_result["url"],
-                    language=None
-                )
-
-                if url_result["type"] == "danger":
-
-                    st.error(
-                        f"⚠️ {url_result['status']}\n\n"
-                        "Multiple security engines reported malicious activity."
-                    )
-
-                elif url_result["type"] == "warning":
-
-                    st.warning(
-                        f"⚠️ {url_result['status']}\n\n"
-                        "Some security indicators require caution."
-                    )
-
-                else:
-
-                    st.success(
-                        f"✓ {url_result['status']}\n\n"
-                        "No significant malicious detections were reported."
-                    )
+        st.markdown(
+            '<h3 class="section-title">🛡️ Security Assessment</h3>',
+            unsafe_allow_html=True
+        )
 
 
-                metric1, metric2, metric3, metric4 = st.columns(4)
-
-                with metric1:
-
-                    st.metric(
-                        "Malicious",
-                        url_result["malicious"]
-                    )
-
-                with metric2:
-
-                    st.metric(
-                        "Suspicious",
-                        url_result["suspicious"]
-                    )
-
-                with metric3:
-
-                    st.metric(
-                        "No Threat",
-                        url_result["harmless"]
-                    )
-
-                with metric4:
-
-                    st.metric(
-                        "Engines Checked",
-                        url_result["total"]
-                    )
+        phishing_detected = False
+        url_threat_detected = False
 
 
-        # ====================================================
-        # COMBINED ASSESSMENT
-        # ====================================================
+        if visual_result:
 
-        if (
-            image_result
-            and url_result
-            and "error" not in url_result
-        ):
+            if (
+                visual_result["prediction"] == 1
+                and visual_result["phishing_probability"] >= 60
+            ):
 
-            st.markdown("---")
+                phishing_detected = True
 
-            st.markdown("## 🛡️ Security Assessment")
 
-            visual_risk = (
-                image_result["phishing"] >= 50
+        if url_result and url_result["success"]:
+
+            if url_result["assessment"] in [
+                "Potential Threat",
+                "Suspicious"
+            ]:
+
+                url_threat_detected = True
+
+
+        # Both indicate danger
+        if phishing_detected and url_threat_detected:
+
+            st.error(
+                "🚨 Multiple security indicators detected. "
+                "The website should be treated with caution."
             )
 
-            url_malicious = (
-                url_result["malicious"] >= 1
-            )
-
-            url_suspicious = (
-                url_result["suspicious"] >= 1
+            st.write(
+                "Avoid entering passwords, payment information, "
+                "or other sensitive data."
             )
 
 
-            if visual_risk and url_malicious:
+        # Visual model indicates phishing
+        elif phishing_detected:
 
-                st.error(
-                    "⚠️ Multiple Risk Indicators\n\n"
-                    "The screenshot analysis and URL analysis "
-                    "both indicate potential risk. Avoid entering "
-                    "passwords, payment details, OTPs, or other "
-                    "sensitive information."
-                )
+            st.warning(
+                "⚠️ The screenshot analysis indicates "
+                "potential phishing characteristics."
+            )
 
-            elif visual_risk and url_suspicious:
-
-                st.warning(
-                    "⚠️ Additional Verification Recommended\n\n"
-                    "Both analyses produced warning indicators. "
-                    "Verify the domain carefully before continuing."
-                )
-
-            elif url_malicious:
-
-                st.error(
-                    "⚠️ URL Risk Detected\n\n"
-                    "The URL analysis detected malicious activity. "
-                    "Treat the website with caution even if its "
-                    "appearance looks normal."
-                )
-
-            elif visual_risk:
-
-                st.warning(
-                    "⚠️ Suspicious Website Appearance\n\n"
-                    "The visual analysis detected phishing-like "
-                    "characteristics. Verify the website address "
-                    "before entering sensitive information."
-                )
-
-            else:
-
-                st.success(
-                    "✓ No Strong Risk Indicators\n\n"
-                    "Neither analysis produced strong phishing "
-                    "indicators. Continue to verify the domain "
-                    "before sharing sensitive information."
-                )
+            st.write(
+                "Verify the website domain and avoid entering "
+                "sensitive information until it is verified."
+            )
 
 
-# ============================================================
-# SAFETY INFORMATION
-# ============================================================
+        # URL indicates threat
+        elif url_threat_detected:
 
-st.markdown("---")
+            st.warning(
+                "⚠️ Threat intelligence detected suspicious "
+                "indicators associated with the URL."
+            )
 
-st.info(
-    "🔐 **Stay Safe Online**\n\n"
-    "Check the domain carefully before logging in. "
-    "Avoid entering passwords, card details, OTPs, or other "
-    "sensitive information on websites you do not trust. "
-    "Security results are indicators and do not guarantee "
-    "that a website is safe."
-)
+            st.write(
+                "Avoid entering credentials or financial "
+                "information on this website."
+            )
+
+
+        # No indicators
+        else:
+
+            st.success(
+                "✅ No significant phishing indicators were "
+                "detected by the available analyses."
+            )
+
+            st.write(
+                "Always verify the website address before "
+                "entering sensitive information."
+            )
 
 
 # ============================================================
 # FOOTER
 # ============================================================
 
+st.markdown("---")
+
 st.caption(
-    "PhishVision AI • Website security analysis"
+    "PhishVision AI provides security indicators for analysis "
+    "and should not be treated as a definitive security verdict."
 )

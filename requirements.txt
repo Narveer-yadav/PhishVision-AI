@@ -1,7 +1,10 @@
+streamlit
 torch
 torchvision
 transformers
 pillow
+requests
+python-dotenv
 scikit-learn
 matplotlib
-streamlit
+huggingface_hub
